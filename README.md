@@ -41,3 +41,10 @@ Available commands:
 ### Add
 
 Adds an expense of the specified amount to the specified category.
+
+## Raspberry Pi Build
+
+```shell
+cargo install cross
+cross build --release --target armv7-unknown-linux-gnueabihf
+```
