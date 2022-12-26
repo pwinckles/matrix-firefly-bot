@@ -1,11 +1,14 @@
 use anyhow::anyhow;
 use chrono::{DateTime, Local};
+use log::{debug, error, info, warn, LevelFilter};
 use matrix_sdk::config::SyncSettings;
-use matrix_sdk::room::Room;
+use matrix_sdk::room::{Joined, Room};
+use matrix_sdk::ruma::events::reaction::{ReactionEventContent, Relation};
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
 };
 use matrix_sdk::ruma::exports::http::StatusCode;
+use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
 use matrix_sdk::Client as MatrixClient;
 use reqwest::Client as HttpClient;
 use serde::Deserialize;
@@ -17,7 +20,6 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
-use matrix_sdk::ruma::OwnedRoomId;
 
 // Based on example at: https://github.com/matrix-org/matrix-rust-sdk/tree/main/examples/command_bot
 
@@ -34,11 +36,13 @@ const PING_CMD: &str = "!ping";
 const ADD_USAGE: &str = "!add <Category>: <Amount>";
 const INVALID_ARGS: &str = "Invalid arguments.";
 
+#[derive(Debug)]
 struct AddArgs {
     category: String,
     amount: f64,
 }
 
+#[derive(Debug)]
 enum Cmd {
     Ping,
     Help,
@@ -118,15 +122,15 @@ impl MatrixFireflyBot {
     }
 
     async fn start(self) -> anyhow::Result<()> {
-        println!("Initializing...");
+        info!("Initializing...");
 
         let home = dirs::data_dir().unwrap().join(CACHE_DIR);
 
-        let client =
-            MatrixClient::builder()
-                .homeserver_url(&self.config.matrix_homeserver_url)
-                .sled_store(home, None)?
-                .build().await?;
+        let client = MatrixClient::builder()
+            .homeserver_url(&self.config.matrix_homeserver_url)
+            .sled_store(home, None)?
+            .build()
+            .await?;
 
         client
             .login_username(&self.config.matrix_username, &self.config.matrix_password)
@@ -145,13 +149,13 @@ impl MatrixFireflyBot {
                 let self_arc = Arc::clone(&self_arc);
                 async move {
                     if let Err(e) = self_arc.on_room_message(event, room).await {
-                        eprintln!("Failed to process message: {}", e);
+                        error!("Failed to process message: {e}");
                     }
                 }
             }
         });
 
-        println!("Listening for messages...");
+        info!("Listening for messages...");
 
         let settings = SyncSettings::default().token(response.next_batch);
         client.sync(settings).await?;
@@ -164,6 +168,8 @@ impl MatrixFireflyBot {
         event: OriginalSyncRoomMessageEvent,
         room: Room,
     ) -> anyhow::Result<()> {
+        debug!("Received event: {event:?}");
+
         if let Room::Joined(room) = room {
             let MessageType::Text(message) = event.content.msgtype else {
                 return Ok(());
@@ -184,25 +190,40 @@ impl MatrixFireflyBot {
             let cmd = match Cmd::parse(&content) {
                 Ok(cmd) => cmd,
                 Err(e) => {
-                    room.send(RoomMessageEventContent::text_plain(e.to_string()), None)
-                        .await?;
+                    warn!("Failed to parse: '{content}'. {e}");
+                    send_message(e.to_string(), &room).await?;
                     return Ok(());
                 }
             };
 
-            let response = match cmd {
-                Cmd::Ping => "pong".to_string(),
+            info!("Received command: {cmd:?}");
+
+            match cmd {
+                Cmd::Ping => send_message("pong".to_string(), &room).await?,
                 Cmd::Help => {
-                    format!("Available commands:\n - {ADD_USAGE}\n - {HELP_CMD}\n - {PING_CMD}")
+                    send_message(
+                        format!(
+                            "Available commands:\n - {ADD_USAGE}\n - {HELP_CMD}\n - {PING_CMD}"
+                        ),
+                        &room,
+                    )
+                    .await?;
                 }
                 Cmd::Add(AddArgs { category, amount }) => {
-                    self.add_expense(&category, amount, username, timestamp)
+                    match self
+                        .add_expense(&category, amount, username, timestamp)
                         .await
+                    {
+                        Ok(_) => {
+                            send_reaction("✅".to_owned(), event.event_id.clone(), &room).await?;
+                        }
+                        Err(e) => {
+                            error!("{e}");
+                            send_reaction("❌".to_owned(), event.event_id.clone(), &room).await?;
+                        }
+                    }
                 }
-            };
-
-            room.send(RoomMessageEventContent::text_plain(response), None)
-                .await?;
+            }
         }
 
         Ok(())
@@ -214,7 +235,7 @@ impl MatrixFireflyBot {
         amount: f64,
         username: &str,
         timestamp: SystemTime,
-    ) -> String {
+    ) -> anyhow::Result<()> {
         let transaction = Transactions::new(Transaction::withdrawal(
             category.to_string(),
             amount,
@@ -224,7 +245,7 @@ impl MatrixFireflyBot {
             username.to_string(),
         ));
 
-        match self
+        let response = self
             .http_client
             .post(format!(
                 "{}/{FIREFLY_TRANSACTIONS_API}",
@@ -236,29 +257,26 @@ impl MatrixFireflyBot {
             )
             .json(&transaction)
             .send()
-            .await
-        {
-            Ok(response) => match response.status() {
-                StatusCode::OK => {
-                    format!("Successfully processed expense: '{category}: ${amount}'")
-                }
-                _ => {
-                    eprintln!(
-                        "Failed to add transaction: [{:?}] {}",
-                        response.status(),
-                        response
-                            .text()
-                            .await
-                            .unwrap_or_else(|_| { "failed to read response body".to_string() })
-                    );
-                    format!("Failed to process expense: '{category}: ${amount}'")
-                }
-            },
-            Err(e) => {
-                eprintln!("Failed to execute HTTP request: {}", e);
-                format!("Failed to process expense: '{category}: ${amount}'")
+            .await;
+
+        match response {
+            Ok(response) if response.status() != StatusCode::OK => {
+                return Err(anyhow!(
+                    "Failed to add transaction: [{:?}] {}",
+                    response.status(),
+                    response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| { "failed to read response body".to_string() })
+                ));
             }
+            Err(e) => {
+                return Err(anyhow!("Failed to execute HTTP request: {e}"));
+            }
+            _ => {}
         }
+
+        Ok(())
     }
 }
 
@@ -308,10 +326,34 @@ impl AddArgs {
     }
 }
 
+async fn send_message(content: String, room: &Joined) -> anyhow::Result<()> {
+    room.send(RoomMessageEventContent::text_plain(content), None)
+        .await?;
+    Ok(())
+}
+
+async fn send_reaction(
+    reaction: String,
+    event_id: OwnedEventId,
+    room: &Joined,
+) -> anyhow::Result<()> {
+    room.send(
+        ReactionEventContent::new(Relation::new(event_id, reaction)),
+        None,
+    )
+    .await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::builder()
+        .filter_level(LevelFilter::Info)
+        .format_target(false)
+        .init();
+
     if env::args().len() != 2 {
-        eprintln!("Usage: {} <PATH_TO_CONFIG>", env::args().next().unwrap());
+        error!("Usage: {} <PATH_TO_CONFIG>", env::args().next().unwrap());
         exit(1)
     }
 
@@ -323,7 +365,7 @@ async fn main() -> anyhow::Result<()> {
 
     MatrixFireflyBot::new(config).start().await?;
 
-    println!("Exiting");
+    info!("Exiting");
 
     Ok(())
 }
