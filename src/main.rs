@@ -33,13 +33,14 @@ const ADD_CMD: &str = "!add";
 const HELP_CMD: &str = "!help";
 const PING_CMD: &str = "!ping";
 
-const ADD_USAGE: &str = "!add <Category>: <Amount>";
+const ADD_USAGE: &str = "!add <Category>: <Amount>[ - Note]";
 const INVALID_ARGS: &str = "Invalid arguments.";
 
 #[derive(Debug)]
 struct AddArgs {
     category: String,
     amount: f64,
+    note: Option<String>,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ struct Transaction {
     source_id: i64,
     destination_name: String,
     tags: Vec<String>,
+    notes: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -75,6 +77,7 @@ impl Transaction {
         source_id: i64,
         destination_name: String,
         person: String,
+        notes: Option<String>,
     ) -> Self {
         Self {
             transaction_type: "withdrawal".to_string(),
@@ -84,6 +87,7 @@ impl Transaction {
             category_name: category,
             source_id,
             destination_name,
+            notes,
             tags: vec![person],
         }
     }
@@ -209,9 +213,13 @@ impl MatrixFireflyBot {
                     )
                     .await?;
                 }
-                Cmd::Add(AddArgs { category, amount }) => {
+                Cmd::Add(AddArgs {
+                    category,
+                    amount,
+                    note,
+                }) => {
                     match self
-                        .add_expense(&category, amount, username, timestamp)
+                        .add_expense(&category, amount, username, timestamp, note)
                         .await
                     {
                         Ok(_) => {
@@ -235,6 +243,7 @@ impl MatrixFireflyBot {
         amount: f64,
         username: &str,
         timestamp: SystemTime,
+        note: Option<String>,
     ) -> anyhow::Result<()> {
         let transaction = Transactions::new(Transaction::withdrawal(
             category.to_string(),
@@ -243,6 +252,7 @@ impl MatrixFireflyBot {
             self.config.firefly_source_account_id,
             FIREFLY_GENERAL_EXPENSE.to_string(),
             username.to_string(),
+            note,
         ));
 
         let response = self
@@ -301,12 +311,20 @@ impl Cmd {
 
 impl AddArgs {
     fn parse(args: &str) -> anyhow::Result<Self> {
-        let Some((category, amount_str)) = args.split_once(':').map(|(category, amount)| {
+        let Some((category, amount_str, note)) = args.split_once(':').map(|(category, rest)| {
+            let mut amount = rest;
+            let mut note = None;
+
+            if let Some((a, n)) = rest.split_once('-') {
+                amount = a;
+                note = Some(n.trim().to_string());
+            }
+
             let mut a = amount.trim();
             if a.starts_with('$') {
                 a = &a[1..];
             }
-            (category.trim(), a)
+            (category.trim(), a, note)
         }) else {
             return Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"))
         };
@@ -322,6 +340,7 @@ impl AddArgs {
         Ok(Self {
             category: category.to_string(),
             amount,
+            note,
         })
     }
 }
