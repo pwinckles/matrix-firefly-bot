@@ -17,10 +17,11 @@ use std::process::exit;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
+use matrix_sdk::ruma::OwnedRoomId;
 
 // Based on example at: https://github.com/matrix-org/matrix-rust-sdk/tree/main/examples/command_bot
 
-const CACHE_DIR: &str = ".cache/matrix-firefly-bot";
+const CACHE_DIR: &str = "matrix-firefly-bot";
 const BOT_NAME: &str = "firefly bot";
 
 const FIREFLY_GENERAL_EXPENSE: &str = "General expense";
@@ -119,13 +120,13 @@ impl MatrixFireflyBot {
     async fn start(self) -> anyhow::Result<()> {
         println!("Initializing...");
 
-        let mut client_builder =
-            MatrixClient::builder().homeserver_url(&self.config.matrix_homeserver_url);
+        let home = dirs::data_dir().unwrap().join(CACHE_DIR);
 
-        let home = dirs::home_dir().unwrap().join(CACHE_DIR);
-        client_builder = client_builder.sled_store(home, None)?;
-
-        let client = client_builder.build().await?;
+        let client =
+            MatrixClient::builder()
+                .homeserver_url(&self.config.matrix_homeserver_url)
+                .sled_store(home, None)?
+                .build().await?;
 
         client
             .login_username(&self.config.matrix_username, &self.config.matrix_password)
@@ -135,8 +136,10 @@ impl MatrixFireflyBot {
 
         let response = client.sync_once(SyncSettings::default()).await?;
 
+        let room_id = OwnedRoomId::try_from(self.config.matrix_room_id.as_str())?;
+
         let self_arc = Arc::new(self);
-        client.add_event_handler({
+        client.add_room_event_handler(&room_id, {
             let self_arc = Arc::clone(&self_arc);
             move |event: OriginalSyncRoomMessageEvent, room: Room| {
                 let self_arc = Arc::clone(&self_arc);
@@ -162,9 +165,6 @@ impl MatrixFireflyBot {
         room: Room,
     ) -> anyhow::Result<()> {
         if let Room::Joined(room) = room {
-            if room.room_id().as_str() != self.config.matrix_room_id {
-                return Ok(());
-            }
             let MessageType::Text(message) = event.content.msgtype else {
                 return Ok(());
             };
@@ -322,6 +322,8 @@ async fn main() -> anyhow::Result<()> {
     let config = toml::from_slice(&bytes)?;
 
     MatrixFireflyBot::new(config).start().await?;
+
+    println!("Exiting");
 
     Ok(())
 }
