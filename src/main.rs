@@ -83,7 +83,7 @@ impl Transaction {
             transaction_type: "withdrawal".to_string(),
             date,
             amount,
-            description: format!("Expense {category} by {person}"),
+            description: format!("{category} by {person}"),
             category_name: category,
             source_id,
             destination_name,
