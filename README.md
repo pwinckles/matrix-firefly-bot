@@ -34,6 +34,7 @@ firefly_source_account_id = 1
 ```
 Available commands:
  - !add <Category>: <Amount> [Note] [#Tag...]
+ - !categories
  - !help
  - !ping
 ```

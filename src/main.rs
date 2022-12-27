@@ -27,9 +27,12 @@ const CACHE_DIR: &str = "matrix-firefly-bot";
 const BOT_NAME: &str = "firefly bot";
 
 const FIREFLY_GENERAL_EXPENSE: &str = "General expense";
+
 const FIREFLY_TRANSACTIONS_API: &str = "api/v1/transactions";
+const FIREFLY_CATEGORIES_API: &str = "api/v1/categories";
 
 const ADD_CMD: &str = "!add";
+const CATEGORIES_CMD: &str = "!categories";
 const HELP_CMD: &str = "!help";
 const PING_CMD: &str = "!ping";
 
@@ -49,6 +52,7 @@ enum Cmd {
     Ping,
     Help,
     Add(AddArgs),
+    Categories,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -68,6 +72,31 @@ struct Transaction {
 #[derive(Serialize, Deserialize, Debug)]
 struct Transactions {
     transactions: Vec<Transaction>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Pagination {
+    pub total: i64,
+    pub count: i64,
+    pub per_page: i64,
+    pub current_page: i64,
+    pub total_pages: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Attributes {
+    name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Category {
+    id: String,
+    attributes: Attributes,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ListCategories {
+    data: Vec<Category>,
 }
 
 impl Transaction {
@@ -211,12 +240,29 @@ impl MatrixFireflyBot {
                 Cmd::Help => {
                     send_message(
                         format!(
-                            "Available commands:\n - {ADD_USAGE}\n - {HELP_CMD}\n - {PING_CMD}"
+                            "Available commands:\n - {ADD_USAGE}\n - {CATEGORIES_CMD}\n - {HELP_CMD}\n - {PING_CMD}"
                         ),
                         &room,
                     )
                     .await?;
                 }
+                Cmd::Categories => match self.list_categories().await {
+                    Ok(categories) => {
+                        let mut response = String::new();
+                        response.push_str("Categories:");
+
+                        if !categories.is_empty() {
+                            response.push_str("\n - ");
+                            response.push_str(&categories.join("\n - "));
+                        }
+
+                        send_message(response, &room).await?;
+                    }
+                    Err(e) => {
+                        error!("Failed to list categories: {}", e);
+                        send_message("Failed to list categories".to_string(), &room).await?;
+                    }
+                },
                 Cmd::Add(AddArgs {
                     category,
                     amount,
@@ -295,6 +341,29 @@ impl MatrixFireflyBot {
 
         Ok(())
     }
+
+    async fn list_categories(&self) -> anyhow::Result<Vec<String>> {
+        let response: ListCategories = self
+            .http_client
+            .get(format!(
+                "{}/{FIREFLY_CATEGORIES_API}",
+                self.config.firefly_url
+            ))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.firefly_api_key),
+            )
+            .send()
+            .await?
+            .json()
+            .await?;
+
+        Ok(response
+            .data
+            .into_iter()
+            .map(|cat| cat.attributes.name)
+            .collect())
+    }
 }
 
 impl Cmd {
@@ -310,6 +379,7 @@ impl Cmd {
         match cmd_str {
             HELP_CMD => Ok(Cmd::Help),
             PING_CMD => Ok(Cmd::Ping),
+            CATEGORIES_CMD => Ok(Cmd::Categories),
             ADD_CMD => Ok(Cmd::Add(AddArgs::parse(cmd_args)?)),
             _ => Err(anyhow!("Unknown command: {cmd_str}")),
         }
