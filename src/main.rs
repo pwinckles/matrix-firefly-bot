@@ -33,7 +33,7 @@ const ADD_CMD: &str = "!add";
 const HELP_CMD: &str = "!help";
 const PING_CMD: &str = "!ping";
 
-const ADD_USAGE: &str = "!add <Category>: <Amount>[ - Note]";
+const ADD_USAGE: &str = "!add <Category>: <Amount> [Note] [#Tag...]";
 const INVALID_ARGS: &str = "Invalid arguments.";
 
 #[derive(Debug)]
@@ -41,6 +41,7 @@ struct AddArgs {
     category: String,
     amount: f64,
     note: Option<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -70,6 +71,7 @@ struct Transactions {
 }
 
 impl Transaction {
+    #[allow(clippy::too_many_arguments)]
     fn withdrawal(
         category: String,
         amount: f64,
@@ -78,7 +80,9 @@ impl Transaction {
         destination_name: String,
         person: String,
         notes: Option<String>,
+        mut tags: Vec<String>,
     ) -> Self {
+        tags.push(person.clone());
         Self {
             transaction_type: "withdrawal".to_string(),
             date,
@@ -88,7 +92,7 @@ impl Transaction {
             source_id,
             destination_name,
             notes,
-            tags: vec![person],
+            tags,
         }
     }
 }
@@ -217,9 +221,10 @@ impl MatrixFireflyBot {
                     category,
                     amount,
                     note,
+                    tags,
                 }) => {
                     match self
-                        .add_expense(&category, amount, username, timestamp, note)
+                        .add_expense(&category, amount, username, timestamp, note, tags)
                         .await
                     {
                         Ok(_) => {
@@ -244,6 +249,7 @@ impl MatrixFireflyBot {
         username: &str,
         timestamp: SystemTime,
         note: Option<String>,
+        tags: Vec<String>,
     ) -> anyhow::Result<()> {
         let transaction = Transactions::new(Transaction::withdrawal(
             category.to_string(),
@@ -253,6 +259,7 @@ impl MatrixFireflyBot {
             FIREFLY_GENERAL_EXPENSE.to_string(),
             username.to_string(),
             note,
+            tags,
         ));
 
         let response = self
@@ -311,20 +318,40 @@ impl Cmd {
 
 impl AddArgs {
     fn parse(args: &str) -> anyhow::Result<Self> {
-        let Some((category, amount_str, note)) = args.split_once(':').map(|(category, rest)| {
-            let mut amount = rest;
-            let mut note = None;
+        let Some((category, amount_str, note, tags)) = args.split_once(':').map(|(category, rest)| {
+            let (amount, rest) = rest.trim().split_once(' ')
+                .map(|(amount, rest)| {
+                    let trimmed = rest.trim();
+                    (amount, if trimmed.is_empty() { None } else { Some(trimmed) })
+                })
+                .unwrap_or((rest, None));
 
-            if let Some((a, n)) = rest.split_once('-') {
-                amount = a;
-                note = Some(n.trim().to_string());
-            }
+            let has_note = rest.map(|rest| !rest.starts_with('#')).unwrap_or(false);
+
+            let text_parts = rest.map(|rest| rest.split('#')
+                .map(|part| part.trim().to_string())
+                .collect::<Vec<_>>());
+
+            let note = text_parts.as_ref().and_then(|parts| {
+                if has_note {
+                    parts.get(0).cloned()
+                } else {
+                    None
+                }
+            });
+
+            let tags = if has_note {
+                Vec::from(&text_parts.unwrap()[1..])
+            } else {
+                text_parts.unwrap_or_default()
+            };
 
             let mut a = amount.trim();
             if a.starts_with('$') {
                 a = &a[1..];
             }
-            (category.trim(), a, note)
+
+            (category.trim(), a, note, tags)
         }) else {
             return Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"))
         };
@@ -341,6 +368,7 @@ impl AddArgs {
             category: category.to_string(),
             amount,
             note,
+            tags,
         })
     }
 }
