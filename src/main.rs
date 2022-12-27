@@ -39,7 +39,7 @@ const PING_CMD: &str = "!ping";
 const ADD_USAGE: &str = "!add <Category>: <Amount> [Note] [#Tag...]";
 const INVALID_ARGS: &str = "Invalid arguments.";
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct AddArgs {
     category: String,
     amount: f64,
@@ -388,19 +388,31 @@ impl Cmd {
 
 impl AddArgs {
     fn parse(args: &str) -> anyhow::Result<Self> {
-        let Some((category, amount_str, note, tags)) = args.split_once(':').map(|(category, rest)| {
-            let (amount, rest) = rest.trim().split_once(' ')
+        if let Some((category, rest)) = args.split_once(':') {
+            let (amount, rest) = rest
+                .trim()
+                .split_once(' ')
                 .map(|(amount, rest)| {
                     let trimmed = rest.trim();
-                    (amount, if trimmed.is_empty() { None } else { Some(trimmed) })
+                    (
+                        amount,
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed)
+                        },
+                    )
                 })
                 .unwrap_or((rest, None));
 
             let has_note = rest.map(|rest| !rest.starts_with('#')).unwrap_or(false);
 
-            let text_parts = rest.map(|rest| rest.split('#')
-                .map(|part| part.trim().to_string())
-                .collect::<Vec<_>>());
+            let text_parts = rest.map(|rest| {
+                rest.split('#')
+                    .map(|part| part.trim().to_string())
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+            });
 
             let note = text_parts.as_ref().and_then(|parts| {
                 if has_note {
@@ -416,30 +428,30 @@ impl AddArgs {
                 text_parts.unwrap_or_default()
             };
 
-            let mut a = amount.trim();
-            if a.starts_with('$') {
-                a = &a[1..];
+            let mut amount_str = amount.trim();
+            if amount_str.starts_with('$') {
+                amount_str = &amount_str[1..];
             }
 
-            (category.trim(), a, note, tags)
-        }) else {
-            return Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"))
-        };
+            let category = category.trim();
 
-        if category.is_empty() || amount_str.is_empty() {
-            return Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"));
+            if category.is_empty() || amount_str.is_empty() {
+                return Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"));
+            }
+
+            let Ok(amount) = f64::from_str(amount_str) else {
+                return Err(anyhow!("Invalid amount: {amount_str}"))
+            };
+
+            Ok(Self {
+                category: category.to_string(),
+                amount,
+                note,
+                tags,
+            })
+        } else {
+            Err(anyhow!("{INVALID_ARGS} Usage: {ADD_USAGE}"))
         }
-
-        let Ok(amount) = f64::from_str(amount_str) else {
-            return Err(anyhow!("Invalid amount: {amount_str}"))
-        };
-
-        Ok(Self {
-            category: category.to_string(),
-            amount,
-            note,
-            tags,
-        })
     }
 }
 
@@ -485,4 +497,73 @@ async fn main() -> anyhow::Result<()> {
     info!("Exiting");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::AddArgs;
+
+    #[test]
+    fn test_parse_add() {
+        assert_add_arg(parse_add("Test: 1.23"), "Test", 1.23, None, vec![]);
+        assert_add_arg(
+            parse_add("multi word cat: $100"),
+            "multi word cat",
+            100.00,
+            None,
+            vec![],
+        );
+        assert_add_arg(
+            parse_add("cat : 0.25 this is a note"),
+            "cat",
+            0.25,
+            Some("this is a note"),
+            vec![],
+        );
+        assert_add_arg(
+            parse_add("test: 1.25 #tag"),
+            "test",
+            1.25,
+            None,
+            vec!["tag"],
+        );
+        assert_add_arg(
+            parse_add("test: 1 this is a note #one #two #three"),
+            "test",
+            1.00,
+            Some("this is a note"),
+            vec!["one", "two", "three"],
+        );
+        assert_add_arg(
+            parse_add(
+                "   weird spacing   :   $1.01    this one has  extra   spacing    #one    #  two  ",
+            ),
+            "weird spacing",
+            1.01,
+            Some("this one has  extra   spacing"),
+            vec!["one", "two"],
+        );
+    }
+
+    fn parse_add(args: &str) -> AddArgs {
+        AddArgs::parse(args).unwrap()
+    }
+
+    fn assert_add_arg(
+        actual: AddArgs,
+        category: &str,
+        amount: f64,
+        note: Option<&str>,
+        tags: Vec<&str>,
+    ) {
+        assert_eq!(
+            AddArgs {
+                category: category.to_string(),
+                amount,
+                note: note.map(|note| note.to_string()),
+                tags: tags.into_iter().map(|tag| tag.to_string()).collect(),
+            },
+            actual
+        );
+    }
 }
